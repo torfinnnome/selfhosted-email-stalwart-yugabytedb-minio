@@ -1,0 +1,163 @@
+services:
+  stalwart:
+    image: stalwartlabs/stalwart:${STALWART_VERSION}
+    volumes:
+      - ./stalwart:/opt/stalwart
+    restart: unless-stopped
+    depends_on:
+      - yb
+      - minio
+    ports:
+      - 10443:443
+      - 8080:8080
+      - 1025:25
+      - 10587:587
+      - 10465:465
+        #- 143:143
+      - 10993:993
+      - 4190:4190
+        #- 110:110
+        #- 995:995
+      - 1179:1179/udp
+
+  yb:
+    image: yugabytedb/yugabyte:${YB_VERSION}
+    container_name: server-1
+    command: [
+      "/home/yugabyte/bin/yugabyted",
+      "start",
+      "--base_dir=/data0",
+      "--advertise_address=server-1",
+      "--cloud_location=cloud.region.zone",
+      "--master_rpc_port=7100",
+      "--tserver_rpc_port=9100",
+      "--master_webserver_port=7000",
+      "--tserver_webserver_port=9010",
+      "--webserver_port=15433",
+      "--callhome=false",
+      "--background=false"
+    ]
+    ports:
+      - 7000:7000 # web, master
+      - 7100:7100 # yb-master
+      - 9010:9010
+      - 9100:9100 # yb-tserver
+      - 15433:15433
+      - 5433:5433
+      - 9042:9042
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - ./yb/data0:/data0
+      - ./yb/backups:/data0/backups
+
+  minio:
+    image: minio/minio:${MINIO_RELEASE}
+    volumes:
+      - ./minio/data1:/data1
+      - ./minio/data2:/data2
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_PROMETHEUS_AUTH_TYPE: public
+    command: server --console-address ":9001" 
+      http://server1:9000/data1
+      http://server1:9000/data2
+      http://server2:9000/data1 
+      http://server2:9000/data2 
+      http://server3:9000/data1 
+      http://server3:9000/data2 
+    network_mode: host
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: always
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    restart: unless-stopped
+    volumes:
+      - ./prometheus/etc:/etc/prometheus
+      - ./prometheus/data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    ports:
+      - 9090:9090
+    depends_on:
+      - node-exporter
+      - cadvisor
+      - fdb-exporter
+
+  grafana:
+    image: grafana/grafana-oss:latest
+    container_name: grafana
+    restart: unless-stopped
+    volumes:
+      - ./grafana/data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    ports:
+      - 3000:3000
+    depends_on:
+      - prometheus
+
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: node-exporter
+    restart: unless-stopped
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--path.rootfs=/rootfs'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc|rootfs/var/lib/docker/containers|rootfs/var/lib/docker/overlay2|rootfs/run/docker/netns|rootfs/var/lib/docker/aufs)($$|/)'
+    ports:
+      - 9100:9100
+    # Required for scraping host metrics
+    pid: host
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: cadvisor
+    restart: unless-stopped
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+    command:
+      - "--housekeeping_interval=30s"
+    ports:
+      # Use 8081 to avoid conflict with stalwart-mail's 8080 if exposed on host
+      - 8081:8080
+    # Required for scraping container metrics
+    privileged: true
+    devices:
+      - /dev/kmsg:/dev/kmsg
+
+  
+
+  nginx:
+    image: nginx:stable-alpine
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # Add volumes for SSL certs if using HTTPS
+      # - ./certs:/etc/nginx/certs:ro
+      - ./nginx/logs:/var/log/nginx # Mount logs (optional)
+    network_mode: host
+    restart: always
